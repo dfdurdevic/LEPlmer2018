@@ -1,0 +1,967 @@
+---
+title: 'LEPlmer2021: Demonstracija analize'
+author: "Dušica Filipović Đurđević"
+date: "15. oktobar 2021."
+output:
+  slidy_presentation: default
+  beamer_presentation: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Za početak, učitaćemo potrebne pakete
+
+```{r}
+require(rms)
+require(lme4)
+require(languageR)
+require(multcomp)
+require(lsmeans)
+require(multcompView)
+require(pbkrtest)
+require(lmerTest)
+require(randomForest)
+require(party)
+require(gbm)
+require(randomForest)
+require(party)
+require(MASS)
+require(car)
+require(mgcv)
+require(itsadug)
+require(methods)
+require(effects)
+require(RePsychLing)
+require(knitr)
+require(broom)
+```
+
+***
+
+# potom proverimo sta nam je radni direktorijum
+```{r}
+getwd()
+```
+
+ - ako nije onaj koji zelimo, onda podesimo da bude takav (najzgodnije je da to bude onaj u kojem se nalazi fajl sa podacima)
+```{r}
+setwd("C:/Sam/Dokumenti/Obuke/LEPlmer2021")
+```
+
+ - da proverimo da li smo uspeli
+```{r}
+getwd()
+```
+
+
+# Potom učitamo i razgledamo podatke
+
+```{r}
+dat=read.table("FilipovicDurdevic.Kostic.SerbianPolysemy_short.txt",sep="\t",T)
+
+dim(dat)
+
+
+colnames(dat)
+
+head(dat)
+
+str(dat)
+
+```
+
+# ja volim da ono što će mi biti kategorijalni prediktor, odmah stavim u odgovarajući format
+```{r}
+dat$Participant = as.factor(dat$Participant)
+dat$Word = as.factor(dat$Word)
+```
+
+- pogledamo ponovo
+```{r}
+str(dat)
+```
+
+# Proverimo da li ima ispitanika koji su pravili previše grešaka
+```{r}
+
+sort(tapply(dat$Error_code, dat$Participant, sum)/150)
+```
+
+# na osnovu toga isključimo jednog ispitanika
+```{r}
+dat=dat[dat$Participant!="Participant_57",]
+
+dim(dat)
+```
+
+
+# Proverimo da li ima reči sa velikim brojem grešaka
+```{r}
+sort(tapply(dat$Error_code, dat$Word, sum)/30)
+```
+
+
+# na osnovu toga isključimo nekoliko reči
+```{r}
+dat=dat[dat$Word!="PISAK",]
+dat=dat[dat$Word!="PATENT",]
+dat=dat[dat$Word!="SFERA",]
+dim(dat)
+```
+- isključili smo oko 2% podataka
+
+```{r}
+(4500 - 4410)/4500
+```
+
+
+
+# Zadržimo samo tačne odgovore
+```{r}
+
+dat=dat[dat$Error_code == "1",]
+dim(dat)
+```
+- ukupno smo isključili oko 5% podataka
+
+```{r}
+(4500 - 4258)/4500
+```
+
+
+# Vizuelna inspekcija distribucije RT
+```{r}
+par(mfrow=c(2,2))
+plot(sort(dat$RT))
+plot(density(dat$RT))
+qqnorm(dat$RT)
+par(mfrow=c(1,1))
+```
+
+
+# Isključimo nekoliko veoma (besmisleno) brzih odgovora
+
+```{r}
+dat=dat[dat$RT>299,]
+dim(dat)
+```
+
+
+
+# Proverimo koja transformacija RT je preporučena
+```{r}
+powerTransform(dat$RT)
+```
+
+
+# Primenimo inverznu transformaciju
+
+```{r}
+dat$RT=-1000/dat$RT
+```
+
+
+# Pogledamo kako je distribuirano novo RT
+```{r}
+par(mfrow=c(2,2))
+plot(sort(dat$RT))
+plot(density(dat$RT))
+qqnorm(dat$RT)
+par(mfrow=c(1,1))
+```
+
+# Možemo i da testiramo normalnost
+
+```{r}
+shapiro.test(dat$RT)
+ks.test(jitter(dat$RT),"pnorm",mean(dat$RT),sd(dat$RT))
+
+```
+
+
+# Odmah definišemo i inverznu funkciju, koja će nam biti potrebna za lepu y osu prilikom plotovanja RT
+```{r}
+trans <- function(x){
+  rezultat <- -1000/x
+  return(rezultat)
+}
+```
+
+
+# pošto je glavna varijabla u ovoj analizi H
+- iskoristićemo nju da ilustrujemo kako se koristi funkcija trans
+- istovremeno, ovde već vidimo da ovaj efekat može biti nelinearan
+
+```{r}
+ggplot(dat, aes(x=H, y=trans(RT))) + 
+  geom_point() +
+  geom_smooth(method = "loess", se = TRUE)
+```
+
+
+# Logaritmujemo frekvenciju
+
+```{r}
+dat$freko=log(dat$freko)
+```
+
+
+# Ispitamo kolinearnost među prediktorima
+
+```{r}
+
+collin.fnc(dat[,c("len", "ort", "freko", "fam","conc", "H" )])$cnumber
+```
+
+ - Kapa koeficijent je ogroman.
+ - 0-6 nizak
+ - 15-29 umeren
+ - > 29 visok
+
+
+
+# Pošto je Kappa koeficijent katastrofalno veliki, moraćemo da rešimo problem kolinearnosti. Prvo da pogledamo kako izgleda odnos između varijabli
+
+```{r}
+
+pairscor.fnc(dat[,c("RT", "len", "ort", "freko", "fam","conc", "H")], hist=TRUE, smooth=TRUE, cex.point=1, col.points="darkgrey")
+```
+
+# Postoji nekoliko strategija za rešavanje kolinearnosti
+ - jedna varijanta je da izaberemo prediktore koji su najuticajniji
+ - ili da iz svake grupe srodnih prediktora izaberemo jedan
+ - ili da od nekoliko srodnih napravimo novi skor
+ - ili da izvedemo analizu glavnih komponenti 
+
+
+ - za početak, da vidimo kako se rangiraju prediktori po svom uticaju na zavisnu varijablu
+
+# randomForest
+
+```{r}
+rf1 <- randomForest(RT ~ ., data = dat[,c("RT", "len", "ort", "freko", "fam","conc", "H")], importance = TRUE)
+
+varImpPlot(rf1)
+
+importance(rf1)
+```
+
+
+
+# Gradient Boosting Machines
+```{r}
+dat.gbm = dat[,c("RT", "len", "ort", "freko", "fam","conc", "H")]
+
+set.seed(125)
+gbm1 = summary(gbm1 <- gbm(RT ~
+                             len + ort + freko + fam + conc + H,
+                           data=dat.gbm, n.trees=500, interaction.depth=3, shrinkage=0.001, cv.folds=5))
+
+gbm1
+```
+
+
+
+# pošto u ovoj analizi želimo da pokažemo da H radi preko kontrolnih, poznatih varijabli, tj. ne interesuju nas pojedinačne kontrolne varijable, biramo drugi pristup, izvodimo analizu glavnih komponenti na skupu kontrolnih varijabli
+```{r}
+dat.pca = prcomp(dat[,c("len", "ort","freko","fam", "conc")],
+                 center = TRUE,
+                 scale. = TRUE)
+
+summary(dat.pca)
+```
+
+# da plotujemo varijansu
+```{r}
+plot(dat.pca, type = "l")
+```
+
+# da plotujemo procenat objašnjene varijanse
+```{r}
+props = round((dat.pca$sdev ^ 2 / sum(dat.pca$sdev ^ 2)), 3)
+barplot(props, col = as.numeric (props > 0.05), 
+        xlab = "glavne komponente",
+        ylab = "proporcija objasnjene varijanse")
+abline (h = 0.05)
+```
+
+ - svi objašnjavaju barem 5% varijanse, zadržavamo ih sve
+
+# da vidimo loadings
+```{r}
+dat.pca$rotation
+```
+
+
+# pišemo koordinate svih reči u prostoru novih dimenzija, pravimo nove, nekolinearne kontrolne varijable
+```{r}
+dat$pc_1 = dat.pca$x[,1]
+dat$pc_2 = dat.pca$x[,2]
+dat$pc_3 = dat.pca$x[,3]
+dat$pc_4 = dat.pca$x[,4]
+dat$pc_5 = dat.pca$x[,5]
+```
+
+
+# Ispitamo kolinearnost u novom setu
+```{r}
+collin.fnc(dat[,c("pc_1","pc_2","pc_3", "pc_4","pc_5", "H" )])$cnumber
+```
+
+
+
+#- ovo je već prihvatljivije
+ - vidimo da je H slabo-umereno korelirana sa nekim od komponenti
+ - međutim, ostavićemo ovako, Kappa koeficijent je umeren, prihvatljivije
+ - a mi želimo da pokažemo da H radi preko kontrolnih
+ 
+```{r}
+pairscor.fnc(dat[,c("RT", "pc_1","pc_2","pc_3", "pc_4","pc_5", "H")], hist=TRUE, smooth=TRUE, cex.point=1, col.points="darkgrey")
+```
+
+
+
+
+
+# Standardizujemo prediktore
+```{r}
+dat$trial.z = scale(dat$Trial_order)
+dat$freko.z = scale(dat$freko)
+dat$len.z = scale(dat$len)
+dat$fam.z = scale(dat$fam)
+dat$conc.z = scale(dat$conc)
+dat$ort.z = scale(dat$ort)
+dat$N.z = scale(dat$N)
+dat$T.z = scale(dat$T)
+dat$H.z = scale(dat$H)
+dat$PC1 = scale(dat$pc_1)
+dat$PC2 = scale(dat$pc_2)
+dat$PC3 = scale(dat$pc_3)
+dat$PC4 = scale(dat$pc_4)
+dat$PC5 = scale(dat$pc_5)
+```
+# pogledamo kolinearnost posle skaliranja
+```{r}
+collin.fnc(dat[,c("PC1","PC2","PC3", "PC4","PC5", "H.z" )])$cnumber
+```
+
+
+
+# pored Kappa koeficijenta, može da se koristi i VIF (variance inflation factor)
+ - VIF veći od 5 ili 10 smatra se velikim
+```{r}
+vif(lm(RT ~ len + ort + freko + fam + conc + H, data = dat))
+```
+
+
+# #################################################################
+
+# SAD MOŽEO DA PREĐEMO NA FITOVANJE MODELA
+
+ - VAŽNA NAPOMENA
+ - STATISTIČKO MODELOVANJE JE KOMBINACIJA NAUKE I VEŠTINE
+ - NIKADA NEĆETE DO KRAJA SAVLADATI TEHNIKU
+ - UVEK SE POJAVLJUJU NOVE PREOPORUKE
+ - I NOVA "PRAVILA" KOJA TREBA POŠTOVATI
+ - KAO I NOVI NAČINI DA SE TO UČINI
+
+
+
+# #############################
+# STRATEGIJA 1
+ - krenemo od najjednostavnijeg modela
+ - dodajemo jedan po jedan parametar
+ - poredimo modele
+ - ako nema razlike, parametar nije opravdan
+ - ako ima razlike, parametar jeste opravdan, zadržavamo ga
+
+
+# Počinjemo sa osnovnim modelima koji imaju samo intercept među fiksnim efektima
+ - samo ispitanike, odnosno samo reči kao random, 
+ - poredimo sa modelom koji ima oba, da budemo sigurni u doprinos
+```{r}
+lmer0a <- lmer(RT ~ 1 + 
+                 (1 |Participant),
+               data=dat, REML=FALSE)
+```
+
+```{r}
+lmer0b <- lmer(RT ~ 1 + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+lmer0 <- lmer(RT ~ 1 + 
+                (1 | Participant) + 
+                (1 | Word),	
+              data=dat, REML=FALSE)
+```
+
+```{r}
+anova(lmer0a, lmer0)
+
+```
+
+```{r}
+
+anova(lmer0b, lmer0)
+```
+
+
+# dodajemo redosled izlaganja među prediktore
+ - prvo vizualizujemo, 
+ - potom pravimo model 
+ - i proveravamo da li je opravdano ukljucivanje tog parametra
+
+```{r}
+ggplot(dat, aes(x=trial.z, y=RT)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~Participant) 
+```
+
+```{r}
+
+lmer1a <- lmer(RT ~ trial.z + 
+                 (1 | Participant) + 
+                 (1 | Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+anova(lmer0, lmer1a)
+```
+
+
+# dozvoljavamo redosledu izlaganja da ima razlicit efekat kod razlicitih ispitanika
+
+```{r}
+lmer1b <- lmer(RT ~ trial.z + 
+                 (1 + trial.z | Participant) + 
+                 (1 | Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+anova(lmer1b, lmer1a)
+```
+
+# proveravamo da li je opravdana korelacija između dva parametra u random interakcijama
+ - tako sto kreiramo model bez korelacije
+ - pa uporedimo fitove
+
+```{r}
+lmer1bb <- lmer(RT ~ trial.z + 
+                  (1 + trial.z || Participant) + 
+                  (1 | Word),	
+                data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer1b, lmer1bb)		
+```
+
+ -  nije opravdana korelacija
+
+
+
+
+
+# slučajna interakcija redosleda sa rečima
+
+```{r}
+ggplot(dat, aes(x=trial.z, y=RT)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~Word) 
+```
+
+- ako se ne vidi lepo slika, možemo da je sačuvamo pa gledamo otvoreni fajl
+
+```{r}
+ggsave("random.trial.word.jpg", width = 25, height = 25)
+```
+
+```{r}
+lmer1c <- lmer(RT ~ trial.z + 
+                 (1 + trial.z || Participant) + 
+                 (1 + trial.z | Word),	
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer1bb, lmer1c)
+```
+
+- nije opravdana, vraćamo se na prethodni model, lmer1bb
+
+
+
+
+# dodajem prvi sledeći prediktor
+ -  i proveravamo da li je opravdano njegovo uključicanje u model
+ -  tj. da li doprinosi objašnjenoj varijansi
+```{r}
+lmer2 <- lmer(RT ~ trial.z + PC1 +
+                (1 + trial.z || Participant) + 
+                (1 | Word),	
+              data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer1bb, lmer2)
+```
+
+
+# dodajemo ga u slučajne efekte
+```{r}
+lmer2a <- lmer(RT ~ trial.z + PC1 +
+                 (1 + PC1 | Participant) + (0 + trial.z | Participant) +
+                 (1 | Word),	
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer2, lmer2a)
+```
+
+# da li je opravdana korelacija u slučajnim
+```{r}
+lmer2b <- lmer(RT ~ trial.z + PC1 +
+                 (1 | Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),	
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer2a, lmer2b)
+```
+
+ -  nije opravdana
+
+
+
+# testiramo njegovu nelinearnost
+```{r}
+lmer2c <- lmer(RT ~ trial.z + poly(PC1,2) +
+                 (1 | Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),	
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer2b, lmer2c)
+```
+
+# i tako redom za sve prediktore, gradimo model
+ -  i proveravamo da li je dodatna komplikacija opravdana podacima
+
+ -  ako uđemo u zonu u kojoj konvergencija više nije moguća
+ -  pojednostavimo strukturu slučajnih efekata
+ -  kako bismo testirali fiksne
+ -  pa kad napravimo konačnu strukturu fiksnih
+ -  ponovimo testiranje sa dodatom složenijom strukturom slučajnih efekata
+
+
+
+# sad ćemo, potkrepljenja radi odmah dodati H
+
+```{r}
+lmer3a <- lmer(RT ~ trial.z + PC1 + H.z +
+                 (1 | Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),		
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer2b, lmer3a)
+```
+
+# dodajemo ga u slučajne efekte
+```{r}
+lmer3b <- lmer(RT ~ trial.z + PC1 + H.z +
+                 (1 + H.z| Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),		
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer3a, lmer3b)
+```
+
+# da li je opravdana korelacija
+```{r}
+lmer3c <- lmer(RT ~ trial.z + PC1 + H.z +
+                 (1 | Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) + (0 + H.z | Participant) +
+                 (1 | Word),		
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer3b, lmer3c)
+```
+
+ -  ne, ali ga ostavljamo za sada, jer je to naš ključni prediktor
+
+
+
+# testiramo njegovu nelinearnost
+```{r}
+lmer3d <- lmer(RT ~ trial.z + PC1 + poly(H, 2) +
+                 (1 + H.z| Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),		
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer3c, lmer3d)
+```
+
+ -  nije nelinearan
+
+# MODEL JE VEĆ PRIJAVIO DA IMA PROBLEMA SA KONFERGENCIJOM
+ - TO ZNAČI DA SMO VEĆ PREOPTERETILI SLUČAJNIM EFEKTIMA...
+ - A TEK SMO POČELI
+
+
+# testiramo interakciju sa fiksnim prediktorima
+```{r}
+lmer3e <- lmer(RT ~ trial.z * H.z + PC1 +
+                 (1 + H.z| Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),		
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer3c, lmer3e)
+```
+ -  ova interakcija nije opravdana
+
+
+```{r}
+lmer3f <- lmer(RT ~ trial.z + PC1 * H.z +
+                 (1 + H.z| Participant) + (0 + trial.z | Participant) +
+                 (0 + PC1 | Participant) +
+                 (1 | Word),		
+               data=dat, REML=FALSE)		
+```
+
+```{r}
+anova(lmer3c, lmer3f)
+```
+ -  ova interakcija jeste opravdana, za sada je najbolji model lmer3f
+
+
+
+# tek kad smo pokazali da neki prediktor doprinosi objašnjenoj varijansi smemo da pogledamo da li je koeficijent stastistički značajan
+```{r}
+summary(lmer3f)
+```
+
+
+
+##########################################################		
+##########################################################		
+# STRATEGIJA 2 
+ -  krenemo od najkomplikovanijeg smislenog modela
+ -  izbacujemo jedan po jedan parametar
+ -  poredimo modele
+ -  ako nema razlike, taj parametar nije opravdan
+ -  ako ima razlike, taj parametar je opravdan, zadržavamo ga
+```{r}
+lmerXa <- lmer(RT ~ trial.z * PC1 * H.z +
+                 (1 + trial.z * PC1 * H.z|Participant) + 
+                 (1 + trial.z |Word),	
+               data=dat, REML=FALSE)
+```
+ -  prvo da pokušamo da pojednostavimo strukturu slučajnih efekata
+```{r}
+summary(rePCA(lmerXa))
+```
+ -  ovo često neće da konvergira	
+
+
+
+# zbog toga je zgodno vratiti se na jednostavniju strukturu slučajnih da olakšamo stvar
+```{r}
+lmerX <- lmer(RT ~ trial.z * PC1 * H.z +
+                 (1 |Participant) + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+# izbacimo jedan parametar, trostruku interakciju, pa napravimo novi model
+```{r}
+lmerX1 <- lmer(RT ~ trial.z * PC1 + 
+                    trial.z * H.z +
+                    PC1 * H.z +
+                    (1 |Participant) + 
+                    (1 |Word),	
+                    data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX1, lmerX)
+```
+ -  nije opravdana trostruka interakcija
+
+
+# sad iizbacujem po jednu dvostruku
+```{r}
+lmerX2 <- lmer(RT ~ trial.z * PC1 + 
+                 trial.z * H.z +
+                 (1 |Participant) + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX1, lmerX2)
+```
+
+ -  interakcija PC1 i H.z je opravdana
+
+```{r}
+lmerX3 <- lmer(RT ~ trial.z * PC1 + 
+                 PC1 * H.z +
+                 (1 |Participant) + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX1, lmerX3)
+```
+ -  interakcija trial.z i H.z nije opravdana
+
+```{r}
+lmerX4 <- lmer(RT ~ 
+                 trial.z * H.z +
+                 PC1 * H.z +
+                 (1 |Participant) + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX1, lmerX4)
+```
+ -  interakcija trial.z i PC1 nije opravdana
+
+
+
+# na osnovu ovih poređenja ostavljamo u modelu samo one parametre čije izbacivanje pravi razliku
+
+ -  ostavljam samo interakciju koja je opravdana
+
+```{r}
+lmerX5 <- lmer(RT ~ trial.z + 
+                 PC1 * H.z +
+                 (1 |Participant) + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX1, lmerX5)
+```
+ -  nema razlike, dakle jednostavniji model lmerX5 je podjednako uspešan kao komplikovani lmerX1
+
+
+
+
+# proverimo da li su preostali bez interakcije potrebni
+ -  šta je sa glavnim efektom trial.z
+
+```{r}
+lmerX6 <- lmer(RT ~ 
+                 PC1 * H.z +
+                 (1 |Participant) + 
+                 (1 |Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX5, lmerX6)
+```
+ -  opravdan je
+ - i dalje je najbolji model lmerX5
+
+
+# sada vraćam slučajne interakcije
+-  AKO MODEL NEĆE DA KONVERGIRA, PRVO IZBACIVATI KORELACIJE IZMEĐU SLUČAJNIH EFEKATA
+```{r}
+lmerY <- lmer(RT ~ trial.z +
+                 PC1 * H.z +
+                 (1 + trial.z + PC1 * H.z | Participant) + 
+                 (1 + trial.z | Word),	
+               data=dat, REML=FALSE)
+```
+
+```{r}
+
+anova(lmerX6, lmerY)
+```
+ -  sve ove slučajne interakcije doprinose zajedno
+ -  ali
+# da proverimo da li su svi slučajni efekti opravdani
+```{r}
+summary(rePCA(lmerY))
+```
+
+
+- VIDIMO DA JE U SLUČAJU REČI KOMPLETNA VARIJANSA OBJAŠNJENA VEĆ SA JEDNOM GLAVNOM KOMPONENTOM, A U SLUČAJU ISPITANIKA VEĆ SA 3 GLAVNE KOMPONENTE 
+- TO ZNAČI DA JE OPRAVDANO IZBACITI 2 PARAMETARA IZ STRUKTURE SLUČAJNIH EFEKATA PO ISPITANICIMA
+- TAKOĐE, OPRAVDANO JE ISKLJUČITI JEDAN PARAMETAR IZ STRUKTURE SLUČAJNIH EFEKATA PO REČIMA
+
+- po WORD
+- dovoljan jedan, zadržavamo onaj sa većom varijasnom
+
+- po PARTICIPANT
+- dovoljna 3
+- izbacujemo dva sa najmanjom varijansom
+
+
+# PRIKAŽEMO KOEFICIJENTE DA BISMO DETEKTOVALI KOMPONENTE SA NAJMANJOM VARIJANSOM KOJE ĆEMO IZBACITI
+
+```{r}
+lmerY
+```
+
+# Uporedimo dva modela
+
+```{r}
+lmerY1 <- lmer(RT ~ trial.z +
+                PC1 * H.z +
+                (1 + trial.z + H.z | Participant) + 
+                (1 | Word),	
+              data=dat, REML=FALSE)
+```
+
+```{r}
+anova(lmerY, lmerY1)
+```
+- nema razlike između dva modela
+- dakle, komplikacije su bile nepotrebne
+
+- konačni model je lmerY1
+
+
+
+# tek sad smemo da pogledamo koeficijente
+```{r}
+summary(lmerY1)
+```
+
+
+
+
+
+
+# treba još proveriti da li su efekti nelinearni
+
+
+
+
+# na kraju prelazimo na dijagnostiku
+```{r}
+confint(lmerY1, method="Wald")
+```
+- Vidimo da se naši efekti uvek nalaze sa iste strane nule
+- osim efekta redosleda, koji nije baš pouzdan
+
+# Sada ćemo da proverimo da li su prekršeni neki od preduslova za primenu linernog modela:
+
+
+- Napravimo kolonu sa predviđenim vrednostima ZV:
+```{r}
+dat$RT.fitted = predict(lmerY1)
+```
+- Napravimo kolonu sa rezidualima:
+```{r}
+dat$RT.res = residuals(lmerY1)
+```
+- Plotujemo korelaciju između fitovanih vrednosti i reziduala
+ + Da proverimo da li postoji homogenost varijanse
+ + Ovo treba da bude jedno lepo “jaje”
+```{r}
+ggplot(dat, aes(x=RT.fitted, y=RT.res)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE) 
+```
+
+# Da proverimo da li se reziduali normalno distribuiraju
+- Ovo treba da bude što sličnije ravnoj liniji:
+```{r}
+ggplot(dat, aes(sample=RT.res)) +
+  stat_qq() + stat_qq_line()
+```
+
+
+# Isto to može i ovako:
+```{r}
+par(mfcol=c(1,2))
+qqnorm(resid(lmerY1))
+plot(fitted(lmerY1), resid(lmerY1))
+par(mfcol=c(1,1))
+```
+
+
+
+# Sad ćemo da izbacimo tačke sa velikim rezidualima
+- I da proverimo da li utiču previše na model
+- Refitujemo model na podskupu tačaka čiji su reziduali unutar opsega +/-2.5 sigme
+
+```{r}
+lmerY1t <- lmer(RT ~ trial.z +
+                 PC1 * H.z +
+                 (1 + trial.z + H.z | Participant) + 
+                 (1 | Word),	
+                 data=dat, 
+                 subset=abs(scale(resid(lmerY1)))<2.5,
+                 REML=FALSE)
+```
+
+- Uporedimo koeficijente iz pročišćenog i originalnog modela
+- ne bi trebalo da se dese drastične promene
+```{r}
+summary(lmerY1t)
+```
+# ponovimo dijagnostiku 
+- sad bi trebalo da je situacija još bolja
+```{r}
+par(mfcol=c(1,2))
+qqnorm(resid(lmerY1t))
+plot(fitted(lmerY1t), resid(lmerY1t))
+par(mfcol=c(1,1))
+```
+
+
+# viizualizujemo finalno efekat glavne varijable
+```{r}
+ggplot(dat, aes(x=H, y=trans(RT.fitted))) + 
+  geom_point() +
+  geom_smooth(method = "loess", se = TRUE)
+
+
+ggsave("H.lmerY1.jpg", width = 5, height = 5)
+```
+
+
